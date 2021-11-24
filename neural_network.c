@@ -11,16 +11,33 @@
  *
  */
 
+typedef struct __layer {
+
+    double ** W;
+    double *  delta;
+    double *  output;
+
+    int n_neurons_curr;
+    int n_neurons_prev;
+
+    double (*activation)( double );
+    double (*activation_derivative)( double );
+    
+} layer;
 
 
 
-/**
- * Gera um aleatório entre [0,1)
- */
+typedef struct __network {
 
-double randd() {
-    return (rand() % 10000000) / 10000000.;
-}
+    layer ** layers; // we need only store (n_layers - 1)
+    int    n_layers;
+    
+    double lrate; // learning rate
+
+    double (*cost_loss)( double *, double *, int );
+
+} network;
+
 
 /**
  * Gera um aleatório entre (a,b)
@@ -28,6 +45,145 @@ double randd() {
 
 double randr(double a, double b) {
     return ((rand() % 10000000) / 10000000.)*(b-a)+a;
+}
+
+
+layer * layer_new( int n_neurons_curr, int n_neurons_prev, double (activation)( double ), double (activation_derivative)( double ) ) {
+    layer * L = (layer *) malloc( sizeof( layer) );
+
+    L->n_neurons_curr = n_neurons_curr;
+    L->n_neurons_prev = n_neurons_prev;
+    L->activation = activation;
+    L->activation_derivative = activation_derivative;
+    L->delta = (double *) malloc( sizeof( double ) * n_neurons_curr );
+    L->output = (double *) malloc( sizeof( double ) * n_neurons_curr );
+    
+    L->W = (double **) malloc( sizeof( double * ) * n_neurons_curr );
+
+    for( int i = 0; i < n_neurons_curr; i++ ) {
+        L->W[i] = (double *) malloc( sizeof( double ) * (n_neurons_prev + 1) ); // + 1 because last position in reserved to bias
+    }
+    /**
+     * Random inicialization of weights
+     */ 
+    for( int i = 0; i < n_neurons_curr; i ++ ) {
+        for( int j = 0; j < n_neurons_prev+1; j++ ) {
+            L->W[i][j] = randr(0.0, 0.5);    
+        }
+    }
+    return L;
+}
+
+void layer_free( layer * L ) {
+    for( int i = 0; i < L->n_neurons_curr; i++ ) {
+        free( L->W[i] );
+    }
+
+    free( L->W );
+    free( L->output );
+    free( L->delta );
+    free( L );
+}
+
+
+void layer_processing( double * X, layer * L ) {
+    for( int i = 0; i < L->n_neurons_curr; i ++ ) {
+        double s = 0.;
+        for( int j = 0; j < L->n_neurons_prev; j++ ) {
+            s += L->W[i][j] * X[j];
+        }
+        s += L->W[i][L->n_neurons_prev]; // Sum the bias
+        L->output[i] = L->activation( s );
+    }
+}
+
+
+void network_free( network * n ) {
+    for( int i = 0; i < n->n_layers - 1; i++ ) {
+        layer_free( n->layers[i] );
+        
+    }
+    free( n->layers );
+    free( n );
+}
+
+network * network_new(  int n_neurons_input, 
+                        int n_neurons_hide, 
+                        int n_neurons_output, 
+                        double lrate,
+                        double (activation)( double ),
+                        double (activation_derivative)( double ),
+                        double (cost_loss)( double *, double *, int ) ) {
+    network * n =  (network *) malloc( sizeof( network )  );
+    n->lrate = lrate;
+    n->n_layers = 3;
+    n->layers = (layer **) malloc( sizeof( layer * ) * (n->n_layers - 1) );
+    n->layers[0] = layer_new( n_neurons_hide, n_neurons_input,  activation, activation_derivative );
+    n->layers[1] = layer_new( n_neurons_output, n_neurons_hide, activation, activation_derivative );
+    n->cost_loss = cost_loss;
+    return n;
+}
+
+/**
+ * result is in last layer output
+ */
+
+void network_predict( double * input, network * n ) {
+    layer_processing( input               , n->layers[0] );
+    layer_processing( n->layers[0]->output, n->layers[1] );
+}
+
+
+
+double network_backpropagation( double ** X, double ** Y, int train_size, network * n ) {
+    double total_loss = 0.;
+    double error = 0.;
+    for( int i = 0; i < train_size; i++ ) {
+        network_predict( X[i], n );
+        total_loss += n->cost_loss( Y[i], n->layers[1]->output, n->layers[1]->n_neurons_curr );
+        int n_layer = (n->n_layers - 2); 
+        for( int j = 0; j < n->layers[n_layer]->n_neurons_curr; j++ ) {
+            n->layers[n_layer]->delta[j] = (n->layers[n_layer]->output[j] - Y[i][j]) * ( n->layers[n_layer]->output[j] );
+        }
+
+        for( int l = (n->n_layers - 2); l >= 1; l-- ) {
+            for( int j = 0; j < n->layers[l]->n_neurons_prev; j++ ) {
+                error = 0.0;
+                for( int k = 0; k < n->layers[l]->n_neurons_curr; k++ ) {
+                    error += n->layers[l]->W[k][j] * n->layers[l]->delta[k];
+                }
+                n->layers[l-1]->delta[j] = error * n->layers[l-1]->activation_derivative( n->layers[l-1]->output[j] ); 
+            }
+        }
+
+        for( int l = (n->n_layers - 2); l >= 0; l-- ) {
+            for( int j = 0; j < n->layers[l]->n_neurons_curr ; j++ ) {
+                for( int k = 0; k < n->layers[l]->n_neurons_prev; k++ ) {
+                    double * X_out_prev;
+                    if( l == 0 )
+                        X_out_prev = X[i];
+                    else
+                        X_out_prev = n->layers[l-1]->output;
+                    
+                    n->layers[l]->W[j][k] -= n->lrate * n->layers[l]->delta[j] * X_out_prev[k]; 
+                    
+                }
+                n->layers[l]->W[j][n->layers[l]->n_neurons_curr] -= n->lrate * n->layers[l]->delta[j];
+            }
+        }
+    }
+    return total_loss;
+}
+
+
+void network_train( double ** X, double ** Y, int train_size, network * n, int max_epocs, double min_error ) {
+    double error = min_error + 1;
+    int i = 0;
+    while(  i < max_epocs &&  error > min_error ) {
+        error = network_backpropagation( X, Y, train_size, n );
+        printf("[%d] MSE %lf\n", i,  error );
+        i++;
+    }
 }
 
 double sigmoid( double x ) {
@@ -38,7 +194,6 @@ double sigmoid_derivative( double x ) {
     return x*(1.-x);
 }
 
-
 double mse( double * x, double * y, int size ) {
     double s = 0.;
     for( int i = 0; i < size; i++ ) {
@@ -46,205 +201,6 @@ double mse( double * x, double * y, int size ) {
     }    
     return s / size;
 }
-
-void processing_layer( double * Y, double * X, double ** W,  double (activation)(double), int nlines, int ncols ) {
-    for( int i = 0; i < nlines; i ++ ) {
-        double s = 0.;
-        for( int j = 0; j < ncols; j++ ) {
-            s += W[i][j] * X[j];
-        }
-        s += W[i][ncols]; // Sum the bias
-        Y[i] = activation( s );
-    }  
-}
-
-void fit( double * Y, double * X, double ** Wi, double ** Wh,  double (activation)(double), int ni, int nh, int no ) {
-    
-    double * Xh = (double *) malloc( sizeof( double ) * nh );
-    processing_layer( Xh, X, Wi, activation, nh, ni );
-    processing_layer( Y, Xh, Wh, activation, no, nh );
-    free( Xh );
-
-}
-
-
-double backpropagation(   double * deltaH, 
-                          double * deltaO, 
-                          double ** X, 
-                          double ** Y, 
-                          double ** Wh, 
-                          double ** Wo,   
-                          int training_size, 
-                          int ni, 
-                          int nh, 
-                          int no,
-                          double (loss)(double*, double *, int),
-                          double (activation)(double),
-                          double (activation_derivative)(double),
-                          double lrate
-                       ) {
-    double error = 0.;
-    
-    double * Xh = (double *) malloc( sizeof( double ) * nh );
-    
-    double * O = (double *) malloc( sizeof( double ) * no );
-    
-    double total_error = 0.;
-    
-    for( int i = 0; i < training_size; i++ ) {
-        
-        /**
-         * Forward propagation
-         */
-     
-        processing_layer( Xh, X[i], Wh, activation, nh, ni);
-
-        
-        processing_layer( O, Xh, Wo, activation, no, nh);
-        
-        
-        total_error += loss( Y[i], O, no ); 
-        
-        /** 
-         * Backward propagation
-         */
-        
-        for( int j = 0; j < no; j++ ) {
-            deltaO[j] = (O[j] - Y[i][j]) * ( O[j] );
-        }
-    
-        for( int j = 0; j < nh; j++ ) {
-            error = 0.0;
-            for( int k = 0; k < no; k++ ) {
-                error += Wo[k][j] * deltaO[k];
-            }
-            deltaH[j] = error * activation_derivative( Xh[j] ); 
-        }
-        
-        
-        /**
-         * Update the weights
-         */
-        for( int j = 0; j < no; j++ ) {
-            error = 0.0;
-            for( int k = 0; k < nh; k++ ) {
-                Wo[j][k] -=  lrate * deltaO[j] * Xh[k];   
-            }
-        
-            Wo[j][nh] -=  lrate * deltaO[j];  // Update the bias
-        }
-    
-        for( int j = 0; j < nh; j++ ) {
-            error = 0.0;
-            for( int k = 0; k < ni; k++ ) {
-                Wh[j][k] -= lrate * deltaH[j] * X[i][k];
-            }
-            Wh[j][ni] -=  lrate * deltaH[j]; // Update the bias
-        }
-        
-       
-
-    }
-
-    free( O );
-    free( Xh );
-    
-    return total_error;
-}
-
-
-void train(  double ** X, 
-             double ** Y,
-             int ni,
-             int nh,
-             int no,
-             int training_size
-           ) {
-           
-    double total_error;
-    
-    double ** Wh = (double **) malloc( sizeof( double * ) * nh );
-    double ** Wo = (double **) malloc( sizeof( double * ) * no );
-    
-    double * deltaH = (double *) malloc( sizeof( double ) * nh );
-    double * deltaO = (double *) malloc( sizeof( double ) * no );
-               
-    double lrate = 0.7;
-    
-    int epoch = 100000;
-    
-    /** 
-     * Alocação das matrizes de peso
-     */
-    for( int i = 0; i < nh; i ++ ) {
-        Wh[i] = (double *) malloc( sizeof( double ) * (ni+1) );
-    }
-    
-    for( int i = 0; i < no; i ++ ) {
-        Wo[i] = (double *) malloc( sizeof( double ) * (nh+1) );
-    }
-    
-    
-    for( int i = 0; i < nh; i ++ ) {
-        for( int j = 0; j < ni+1; j++ ) {
-            Wh[i][j] = randr(0.0, 0.5);    
-        }
-    }
-    
-    for( int i = 0; i < no; i ++ ) {
-        for( int j = 0; j < nh+1; j++ ) {
-            Wo[i][j] = randr(0.0, 0.5);    
-        }
-    }
-    
-    for( int i = 0; i < epoch; i++ ) {
-        total_error = backpropagation(    deltaH, 
-                                          deltaO, 
-                                          X, 
-                                          Y, 
-                                          Wh, 
-                                          Wo, 
-                                          training_size, 
-                                          ni, 
-                                          nh, 
-                                          no,
-                                          mse,
-                                          sigmoid,
-                                          sigmoid_derivative,
-                                          lrate
-                                       );
-    
-        printf("[%d] MSE = %lf\n", i, total_error );
-    
-    }       
-    
-    double * Y_test = (double *) malloc( sizeof( double ) * no );
-    
-    for( int i = 0; i < training_size; i++ ) {
-        
-        fit( Y_test, X[i], Wh, Wo, sigmoid, ni, nh, no );
-        printf("Expected: %lf Predicted: %lf\n", Y[i][0], Y_test[0] );
-    }
-    
-    for( int i = 0; i < nh; i ++ ) {
-        free( Wh[i] );
-    }
-    
-    for( int i = 0; i < no; i ++ ) {
-        free( Wo[i] );
-    }
-    
-    free( Wh );
-    free( Wo );
-    free( Y_test );
-    
-    free( deltaH );
-    free( deltaO );
-
-} 
-            
-
-
 
 int main() {
     
@@ -255,6 +211,7 @@ int main() {
     int nh = 3;     // número de neurônios na camada de oculta
     int no = 1;     // número de neurônios na camada de saída
     
+    double lrate = 0.6;
     
     int train_size = 8;
     
@@ -281,18 +238,32 @@ int main() {
      X[6][0] = 1; X[6][1] = 1; X[6][2] = 0; Y[6][0] = 0;
      X[7][0] = 1; X[7][1] = 1; X[7][2] = 1; Y[7][0] = 1;
      
-     train(  X, 
-             Y,
-             ni,
-             nh,
-             no,
-             train_size
-          );
+    network * net = network_new( ni, 
+                                 nh, 
+                                 no, 
+                                 lrate,
+                                 sigmoid,
+                                 sigmoid_derivative,
+                                 mse );
+
+    network_train(  X,  Y,  train_size, net, 1000000, 10e-8 );
+
+    
+    for( int i = 0; i < train_size; i++ ) {
+
+        network_predict( X[i], net );
+
+        printf("%lf\n", net->layers[1]->output[0] );
+    }
+
+
+
+    network_free( net );
     
     for( int i = 0; i < train_size; i++ ) {
         free( X[i] ); free( Y[i] );
     }
     free( X ); free( Y );
-    
+
     return 0;
 }
